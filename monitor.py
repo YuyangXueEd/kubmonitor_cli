@@ -382,6 +382,7 @@ def get_jobs_pods(ns, pods=None, use_mock=False, mock_data=None, gpu_info=None):
             # reliable source; guessing from the image is a last resort.
             user = "Unknown"
             gpu_request = 0
+            cpu_request = 0.0
             gpu_type_from_selector = None
             job_labels = job.get('metadata', {}).get('labels', {}) or {}
             tpl_meta = spec.get('template', {}).get('metadata', {}) or {}
@@ -408,7 +409,7 @@ def get_jobs_pods(ns, pods=None, use_mock=False, mock_data=None, gpu_info=None):
                     elif len(parts) == 1:
                         user = img.split(':')[0]
 
-                # Get GPU requests
+                # Get GPU and CPU requests
                 for container in containers:
                     resources = container.get('resources', {}).get('requests', {})
                     for key, value in resources.items():
@@ -417,6 +418,11 @@ def get_jobs_pods(ns, pods=None, use_mock=False, mock_data=None, gpu_info=None):
                                 gpu_request += int(value)
                             except (ValueError, TypeError):
                                 # Intentionally ignore bad GPU request values.
+                                pass
+                        elif key == 'cpu':
+                            try:
+                                cpu_request += parse_quantity(value)
+                            except (ValueError, TypeError):
                                 pass
 
                 # Get GPU type from nodeSelector (most reliable source)
@@ -460,6 +466,7 @@ def get_jobs_pods(ns, pods=None, use_mock=False, mock_data=None, gpu_info=None):
                 'duration': duration,
                 'pods': my_pods,
                 'gpu': gpu_request,
+                'cpu': cpu_request,
                 'gpu_type': job_gpu_type  # The actual GPU type being used
             })
 
@@ -583,6 +590,14 @@ def build_row_index(jobs):
         else:
             gpu_display = "-"
 
+        # Format CPU request (cores); requests like "500m" show as 0.5
+        cpu_req = job.get('cpu', 0) or 0
+        if cpu_req > 0:
+            cpu_display = (f"{cpu_req:.0f}" if float(cpu_req).is_integer()
+                           else f"{cpu_req:.1f}")
+        else:
+            cpu_display = "-"
+
         all_rows.append({
             'type': 'job',
             'name': job['name'],
@@ -590,6 +605,7 @@ def build_row_index(jobs):
             'user': job['user'],
             'status': f"[{status_style}]{job['status']}[/]",
             'gpu': gpu_display,
+            'cpu': cpu_display,
             'completions': job['completions'],
             'duration': job['duration'],
             'pod_name': None  # Jobs don't have pod_name for log viewing
@@ -617,6 +633,7 @@ def build_row_index(jobs):
                 'user': "",
                 'status': f"[{p_status_style}]{p_status}[/]",
                 'gpu': "",
+                'cpu': "",
                 'completions': "",
                 'duration': "",
                 'pod_name': p_name  # Actual pod name for log fetching
@@ -630,6 +647,7 @@ def generate_table(jobs, offset=0, max_rows=None, selected_index=0):
     table.add_column("User", style="magenta")
     table.add_column("Status", justify="center")
     table.add_column("GPU", justify="center", style="yellow")
+    table.add_column("CPU", justify="right", style="green")
     table.add_column("Comp", justify="right")
     table.add_column("Duration", justify="right")
 
@@ -657,6 +675,7 @@ def generate_table(jobs, offset=0, max_rows=None, selected_index=0):
             row['user'],
             row['status'],
             row['gpu'],
+            row['cpu'],
             row['completions'],
             row['duration']
         )
@@ -717,9 +736,11 @@ def generate_user_summary(jobs):
             continue
         user = job.get('user') or 'Unknown'
         agg = per_user.setdefault(
-            user, {'gpus': 0, 'running': 0, 'pending': 0, 'models': set()})
-        agg['gpus'] += job.get('gpu', 0) if job['status'] == 'Running' else 0
+            user, {'gpus': 0, 'cpus': 0.0, 'running': 0, 'pending': 0,
+                   'models': set()})
         if job['status'] == 'Running':
+            agg['gpus'] += job.get('gpu', 0)
+            agg['cpus'] += job.get('cpu', 0) or 0
             agg['running'] += 1
         else:
             agg['pending'] += 1
@@ -730,6 +751,7 @@ def generate_user_summary(jobs):
     table.add_column("User", style="magenta", no_wrap=True)
     table.add_column("GPUs", justify="right", style="yellow")
     table.add_column("", min_width=20)
+    table.add_column("CPUs", justify="right", style="green")
     table.add_column("Run", justify="right", style="green")
     table.add_column("Pend", justify="right", style="dim")
     table.add_column("Models", style="cyan")
@@ -738,9 +760,13 @@ def generate_user_summary(jobs):
                     key=lambda kv: kv[1]['gpus'], reverse=True)
     max_gpus = max((agg['gpus'] for _, agg in ranked), default=0) or 1
     for user, agg in ranked:
+        cpus = agg['cpus']
+        cpu_display = (f"{cpus:.0f}" if float(cpus).is_integer()
+                       else f"{cpus:.1f}") if cpus > 0 else "-"
         table.add_row(
             user, str(agg['gpus']),
             usage_bar(agg['gpus'] / max_gpus * 100, width=20),
+            cpu_display,
             str(agg['running']), str(agg['pending']),
             ",".join(sorted(agg['models'])) or "-")
 
