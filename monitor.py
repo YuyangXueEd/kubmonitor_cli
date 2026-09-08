@@ -12,6 +12,8 @@ if platform.system() != "Windows":
     import termios
 else:
     import msvcrt
+import os
+
 import psutil
 from datetime import datetime
 from rich.live import Live
@@ -19,9 +21,39 @@ from rich.layout import Layout
 from rich.panel import Panel
 from rich.table import Table
 from rich.console import Console
+from rich.theme import Theme
 from rich import box
 from mock_data import generate_mock_data
 from version import __version__
+
+# Monokai-inspired palette. Rich resolves style names through the console
+# theme before falling back to literal colors, so remapping the basic
+# color names (and the bold variants used in markup) restyles the whole
+# app without touching call sites. Terminals without truecolor get rich's
+# nearest-color fallback automatically.
+MONOKAI_COLORS = {
+    "cyan": "#66d9ef",
+    "blue": "#66d9ef",
+    "magenta": "#ae81ff",
+    "yellow": "#e6db74",
+    "green": "#a6e22e",
+    "red": "#f92672",
+}
+
+
+def build_theme(name=None):
+    """Return the rich Theme for a scheme name, or None for classic
+    terminal colors. Default comes from $KUBMONITOR_THEME (monokai)."""
+    if name is None:
+        name = os.environ.get("KUBMONITOR_THEME", "monokai")
+    if name != "monokai":
+        return None
+    styles = dict(MONOKAI_COLORS)
+    styles.update({f"bold {k}": f"bold {v}"
+                   for k, v in MONOKAI_COLORS.items()})
+    styles["dim"] = "#75715e"                       # monokai comment grey
+    styles["white on blue"] = "bold #f8f8f2 on #49483e"   # header bar
+    return Theme(styles)
 
 
 def format_duration(total_seconds):
@@ -771,7 +803,8 @@ def generate_log_viewer(logs, pod_name, scroll_offset=0, max_lines=None,
 
 
 def print_help():
-    console = Console(force_terminal=True, legacy_windows=False)
+    console = Console(force_terminal=True, legacy_windows=False,
+                      theme=build_theme())
 
     console.print(
         "\n[bold cyan]kubmonitor[/bold cyan] - Real-time Kubernetes "
@@ -800,6 +833,13 @@ def print_help():
         "querying the actual Kubernetes cluster."
     )
     console.print("                 Useful for testing and development.")
+    console.print(
+        "  [magenta]--theme[/magenta]        Color scheme: "
+        "[cyan]monokai[/cyan] (default) or [cyan]classic[/cyan]."
+    )
+    console.print(
+        "                 [dim]Also settable via $KUBMONITOR_THEME.[/dim]"
+    )
     console.print(
         "  [magenta]-V, --version[/magenta]  Show kubmonitor's version "
         "number.\n"
@@ -848,6 +888,10 @@ def main():
     parser = argparse.ArgumentParser(prog='kubmonitor', add_help=False)
     parser.add_argument('namespace', nargs='?', default='default')
     parser.add_argument('--mock', action='store_true')
+    parser.add_argument('--theme', choices=['monokai', 'classic'],
+                        default=None,
+                        help='color scheme (default: $KUBMONITOR_THEME '
+                             'or monokai)')
     parser.add_argument('--version', '-V', action='version',
                         version=f'kubmonitor {__version__}')
 
@@ -881,7 +925,7 @@ def main():
             print("Failed to load mock data. Exiting.")
             return
 
-    console = Console()
+    console = Console(theme=build_theme(args.theme))
     layout = make_layout()
 
     mode_str = "[bold yellow]MOCK MODE[/]" if args.mock else ""
@@ -900,7 +944,8 @@ def main():
         if platform.system() != "Windows":
             tty.setcbreak(sys.stdin.fileno())
 
-        with Live(layout, refresh_per_second=4, screen=True):
+        with Live(layout, refresh_per_second=4, screen=True,
+                  console=console):
             last_fetch = 0
             fetch_interval = 2
             scroll_offset = 0

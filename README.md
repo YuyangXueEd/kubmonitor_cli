@@ -29,6 +29,7 @@
 - **☸️ Namespace Scoped**: Monitor specific Kubernetes namespaces with ease.
 - **💻 Hybrid Metrics**: View both K8s Cluster Quotas and Local Machine stats side-by-side.
 - **✨ Reactive TUI**: Built with `Refreshed` layouts using [Rich](https://github.com/Textualize/rich).
+- **🎨 Monokai Colors**: A Monokai-inspired truecolor scheme by default (`--theme classic` or `KUBMONITOR_THEME=classic` for plain terminal colors).
 - **🖥️ Cross-Platform**: Works seamlessly on Linux, macOS, and Windows.
 
 ## 📦 Installation

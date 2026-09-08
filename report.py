@@ -356,7 +356,8 @@ def run_report(cfg, month=None, date_from=None, date_to=None,
     finally:
         conn.close()
 
-    console = Console(record=bool(html_path))
+    from monitor import build_theme
+    console = Console(record=bool(html_path), theme=build_theme())
     render_report(console, cfg, data, label)
     if csv_path:
         export_csv(csv_path, data, label)
