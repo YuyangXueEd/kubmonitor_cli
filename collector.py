@@ -44,6 +44,15 @@ def _name_tokens_contains(name, account):
     return f"-{norm}-" in f"-{name.lower()}-"
 
 
+def _images_of(pod_spec):
+    """All container images, comma-joined (or None). Persisted so that
+    retroactive re-attribution sees the same hints live attribution did,
+    including multi-container pods."""
+    images = [c["image"] for c in pod_spec.get("containers", []) or []
+              if c.get("image")]
+    return ",".join(images) if images else None
+
+
 def _image_hints(pod_spec):
     """Possible account tokens hiding in container image references.
 
@@ -246,6 +255,37 @@ def _snapshot_quota(cfg, conn, ts, use_mock, mock_data):
                 parse_quantity(used.get(key, 0)), parse_quantity(hard_val))
 
 
+def _reattribute_unknown(conn, cfg, name_map):
+    """Retry attribution for historical rows that have none.
+
+    Workloads deleted from the cluster are never re-observed, so an
+    account/alias added to the members file *after* they were recorded
+    would otherwise stay unattributed forever. Re-running the name/image
+    matching against the current members map lets history heal itself.
+    Rows fixed by hand (attribution='manual') are never touched.
+    """
+    if not name_map:
+        return 0
+    healed = 0
+    rows = conn.execute(
+        "SELECT uid, name, image FROM workloads "
+        "WHERE project = ? AND attribution = 'none'",
+        (cfg.project,)).fetchall()
+    for row in rows:
+        hints = ()
+        if row["image"]:
+            hints = _image_hints({"containers": [
+                {"image": img} for img in row["image"].split(",")]})
+        account, attribution = resolve_account(
+            row["name"], [{}], cfg.label_prefix, name_map, hints)
+        if account:
+            conn.execute(
+                "UPDATE workloads SET account = ?, attribution = ? "
+                "WHERE uid = ?", (account, attribution, row["uid"]))
+            healed += 1
+    return healed
+
+
 def collect(cfg, use_mock=False, verbose=False):
     """Run one collection cycle. Returns (n_jobs, n_pods) recorded."""
     conn = usagedb.open_db(cfg.db)
@@ -319,6 +359,7 @@ def collect(cfg, use_mock=False, verbose=False):
                 "account": account, "attribution": attribution,
                 "purpose": _purpose_of(label_sets, cfg.label_prefix),
                 "gpu_count": gpu, "gpu_model": gpu_model,
+                "image": _images_of(pod_spec),
                 "cpu_request": cpu, "mem_request_gb": mem_gb,
                 "node": node,
                 "created_at": job.get("metadata", {}).get("creationTimestamp"),
@@ -349,6 +390,7 @@ def collect(cfg, use_mock=False, verbose=False):
                 "account": account, "attribution": attribution,
                 "purpose": _purpose_of(label_sets, cfg.label_prefix),
                 "gpu_count": gpu, "gpu_model": gpu_model,
+                "image": _images_of(pod_spec),
                 "cpu_request": cpu, "mem_request_gb": mem_gb,
                 "node": node,
                 "created_at": pod.get("metadata", {}).get("creationTimestamp"),
@@ -359,6 +401,8 @@ def collect(cfg, use_mock=False, verbose=False):
 
         _snapshot_quota(cfg, conn, ts, use_mock, mock_data)
 
+        healed = _reattribute_unknown(conn, cfg, name_map)
+
         samples = 0
         if cfg.sample_gpu_util and not use_mock:
             for pod, account in gpu_pods_to_sample:
@@ -366,11 +410,12 @@ def collect(cfg, use_mock=False, verbose=False):
 
         usagedb.add_collect_run(conn, ts, cfg.project, True,
                                 len(pods), len(jobs),
-                                f"util_samples={samples}")
+                                f"util_samples={samples} healed={healed}")
         conn.commit()
         if verbose:
             print(f"[{ts}] {cfg.project}: {len(jobs)} jobs, "
-                  f"{len(pods)} pods, {samples} GPU util samples")
+                  f"{len(pods)} pods, {samples} GPU util samples, "
+                  f"{healed} historical rows re-attributed")
         return len(jobs), len(pods)
     except Exception as exc:
         conn.rollback()

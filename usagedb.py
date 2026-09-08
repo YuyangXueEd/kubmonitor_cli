@@ -17,10 +17,11 @@ CREATE TABLE IF NOT EXISTS workloads (
     kind         TEXT NOT NULL,      -- Job | Pod
     name         TEXT NOT NULL,
     account      TEXT,               -- resolved cluster account, NULL if unknown
-    attribution  TEXT NOT NULL,      -- label | name | image | none
+    attribution  TEXT NOT NULL,      -- label | name | image | manual | none
     purpose      TEXT,               -- batch | interactive | serving | NULL
     gpu_count    INTEGER NOT NULL DEFAULT 0,
     gpu_model    TEXT,
+    image        TEXT,               -- container image(s), comma-joined
     cpu_request  REAL,
     mem_request_gb REAL,
     node         TEXT,
@@ -80,7 +81,18 @@ def open_db(path):
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn):
+    """Add columns introduced after a DB was first created (CREATE TABLE
+    IF NOT EXISTS does not evolve existing tables)."""
+    cols = {row["name"] for row in
+            conn.execute("PRAGMA table_info(workloads)")}
+    if "image" not in cols:
+        conn.execute("ALTER TABLE workloads ADD COLUMN image TEXT")
+        conn.commit()
 
 
 def upsert_workload(conn, w):
@@ -102,19 +114,20 @@ def upsert_workload(conn, w):
         w["created_at"] = w.get("created_at") or existing["created_at"]
     conn.execute(
         """INSERT INTO workloads (uid, project, namespace, kind, name,
-               account, attribution, purpose, gpu_count, gpu_model,
+               account, attribution, purpose, gpu_count, gpu_model, image,
                cpu_request, mem_request_gb, node, created_at, started_at,
                completed_at, phase, first_seen, last_seen)
            VALUES (:uid, :project, :namespace, :kind, :name, :account,
-               :attribution, :purpose, :gpu_count, :gpu_model, :cpu_request,
-               :mem_request_gb, :node, :created_at, :started_at,
-               :completed_at, :phase, :first_seen, :last_seen)
+               :attribution, :purpose, :gpu_count, :gpu_model, :image,
+               :cpu_request, :mem_request_gb, :node, :created_at,
+               :started_at, :completed_at, :phase, :first_seen, :last_seen)
            ON CONFLICT(uid) DO UPDATE SET
                account = excluded.account,
                attribution = excluded.attribution,
                purpose = excluded.purpose,
                gpu_count = excluded.gpu_count,
                gpu_model = COALESCE(excluded.gpu_model, workloads.gpu_model),
+               image = COALESCE(excluded.image, workloads.image),
                cpu_request = excluded.cpu_request,
                mem_request_gb = excluded.mem_request_gb,
                node = COALESCE(excluded.node, workloads.node),
