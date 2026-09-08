@@ -20,6 +20,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 import usagedb
+from kmconfig import ConfigError
 
 
 def _parse_ts(value):
@@ -33,18 +34,35 @@ def _parse_ts(value):
 
 
 def parse_window(month=None, date_from=None, date_to=None):
-    """Return (start, end, label) as aware UTC datetimes."""
+    """Return (start, end, label) as aware UTC datetimes.
+
+    Raises ConfigError on malformed inputs so the CLI reports a friendly
+    error instead of a traceback.
+    """
     now = datetime.now(timezone.utc)
     if month:
-        year, mon = (int(p) for p in month.split("-"))
-        start = datetime(year, mon, 1, tzinfo=timezone.utc)
+        try:
+            year, mon = (int(p) for p in month.split("-"))
+            start = datetime(year, mon, 1, tzinfo=timezone.utc)
+        except ValueError:
+            raise ConfigError(
+                f"invalid --month {month!r} (expected YYYY-MM, e.g. 2026-09)")
         last_day = calendar.monthrange(year, mon)[1]
         end = datetime(year, mon, last_day, 23, 59, 59, tzinfo=timezone.utc)
         return start, min(end, now), month
     if date_from or date_to:
-        start = (_parse_ts(date_from + "T00:00:00Z") if date_from
-                 else datetime(1970, 1, 1, tzinfo=timezone.utc))
-        end = (_parse_ts(date_to + "T23:59:59Z") if date_to else now)
+        start = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        if date_from:
+            start = _parse_ts(date_from + "T00:00:00Z")
+            if start is None:
+                raise ConfigError(
+                    f"invalid --from {date_from!r} (expected YYYY-MM-DD)")
+        end = now
+        if date_to:
+            end = _parse_ts(date_to + "T23:59:59Z")
+            if end is None:
+                raise ConfigError(
+                    f"invalid --to {date_to!r} (expected YYYY-MM-DD)")
         label = f"{date_from or 'beginning'} .. {date_to or 'now'}"
         return start, min(end, now), label
     start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)

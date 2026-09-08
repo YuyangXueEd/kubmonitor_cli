@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS workloads (
     kind         TEXT NOT NULL,      -- Job | Pod
     name         TEXT NOT NULL,
     account      TEXT,               -- resolved cluster account, NULL if unknown
-    attribution  TEXT NOT NULL,      -- label | legacy-label | name | none
+    attribution  TEXT NOT NULL,      -- label | name | image | none
     purpose      TEXT,               -- batch | interactive | serving | NULL
     gpu_count    INTEGER NOT NULL DEFAULT 0,
     gpu_model    TEXT,

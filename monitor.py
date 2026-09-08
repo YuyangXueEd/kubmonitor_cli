@@ -1083,7 +1083,7 @@ def main():
                     ))
                     layout["footer"].update(Panel(
                         f"[cyan]↑/↓[/cyan] Scroll  [cyan]r[/cyan] Refresh  "
-                        f"[cyan]ESC/d[/cyan] Close  "
+                        f"[cyan]d/ESC/Bksp/q[/cyan] Close  "
                         f"Describing: [bold]{desc_kind}/{desc_name}[/bold]",
                         style="dim"))
                 elif viewing_users:
@@ -1113,7 +1113,8 @@ def main():
                                                  gpu))
                     layout["right"].update(generate_user_summary(jobs))
                     layout["footer"].update(Panel(
-                        "[cyan]u/ESC[/cyan] Back to Jobs  [cyan]q[/cyan] Quit"
+                        "[cyan]u/ESC/Bksp[/cyan] Back to Jobs  "
+                        "[cyan]q[/cyan] Quit"
                         "  [dim]live allocation by user — history: "
                         "kubmonitor report[/dim]",
                         style="dim"))
