@@ -1,0 +1,29 @@
+# kubmonitor members registry — maps cluster accounts to people.
+#
+# One entry per PERSON; `accounts` lists every cluster/SAFE account they
+# log in with, so usage from all of them aggregates into one report row.
+#
+# This file contains personal data: keep the real copy in a private
+# location (NFS ops directory, private repo), never in a public one.
+#
+# Fields:
+#   name      display name used in reports (required)
+#   email     contact for reports/nudges (optional)
+#   accounts  list of cluster account names (required)
+#   aliases   extra nicknames people embed in job/pod names (optional);
+#             only used for name-based attribution fallback, and resolve
+#             to the person's first account
+#   status    active | inactive — inactive people are still attributed,
+#             but flagged in reports (optional, default active)
+
+members:
+  - name: Ada Lovelace
+    email: ada@example.ac.uk
+    accounts: [ada, ada_test]
+    aliases: [lovelace]
+    status: active
+
+  - name: Charles Babbage
+    email: cbabbage@example.ac.uk
+    accounts: [babbage]
+    status: inactive

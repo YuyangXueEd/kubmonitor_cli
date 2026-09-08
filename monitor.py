@@ -12,6 +12,8 @@ if platform.system() != "Windows":
     import termios
 else:
     import msvcrt
+import os
+
 import psutil
 from datetime import datetime
 from rich.live import Live
@@ -19,9 +21,39 @@ from rich.layout import Layout
 from rich.panel import Panel
 from rich.table import Table
 from rich.console import Console
+from rich.theme import Theme
 from rich import box
 from mock_data import generate_mock_data
 from version import __version__
+
+# Monokai-inspired palette. Rich resolves style names through the console
+# theme before falling back to literal colors, so remapping the basic
+# color names (and the bold variants used in markup) restyles the whole
+# app without touching call sites. Terminals without truecolor get rich's
+# nearest-color fallback automatically.
+MONOKAI_COLORS = {
+    "cyan": "#66d9ef",
+    "blue": "#66d9ef",
+    "magenta": "#ae81ff",
+    "yellow": "#e6db74",
+    "green": "#a6e22e",
+    "red": "#f92672",
+}
+
+
+def build_theme(name=None):
+    """Return the rich Theme for a scheme name, or None for classic
+    terminal colors. Default comes from $KUBMONITOR_THEME (monokai)."""
+    if name is None:
+        name = os.environ.get("KUBMONITOR_THEME", "monokai")
+    if name != "monokai":
+        return None
+    styles = dict(MONOKAI_COLORS)
+    styles.update({f"bold {k}": f"bold {v}"
+                   for k, v in MONOKAI_COLORS.items()})
+    styles["dim"] = "#75715e"                       # monokai comment grey
+    styles["white on blue"] = "bold #f8f8f2 on #49483e"   # header bar
+    return Theme(styles)
 
 
 def format_duration(total_seconds):
@@ -42,6 +74,34 @@ def format_duration(total_seconds):
         weeks = int(total_seconds / 604800)
         days = int((total_seconds % 604800) / 86400)
         return f"{weeks}w {days}d" if days > 0 else f"{weeks}w"
+
+
+def parse_quantity(value):
+    """Parse a Kubernetes quantity ('8', '8000m', '32Gi') to a float in
+    base units (cores for cpu, bytes for memory)."""
+    s = str(value).strip()
+    if not s:
+        return 0.0
+    m = re.match(r"^([0-9.eE+-]+)([a-zA-Z]*)$", s)
+    if not m:
+        return 0.0
+    num, suffix = float(m.group(1)), m.group(2)
+    powers2 = {"Ki": 2**10, "Mi": 2**20, "Gi": 2**30, "Ti": 2**40,
+               "Pi": 2**50, "Ei": 2**60}
+    powers10 = {"": 1, "m": 1e-3, "k": 1e3, "K": 1e3, "M": 1e6,
+                "G": 1e9, "T": 1e12, "P": 1e15, "E": 1e18}
+    if suffix in powers2:
+        return num * powers2[suffix]
+    return num * powers10.get(suffix, 1)
+
+
+def usage_bar(pct, width=14):
+    """A colored block bar for a 0-100 percentage."""
+    pct = max(0.0, min(100.0, pct))
+    filled = round(pct / 100 * width)
+    color = "green" if pct < 50 else "yellow" if pct < 80 else "red"
+    return (f"[{color}]{'█' * filled}[/{color}]"
+            f"[dim]{'░' * (width - filled)}[/dim]")
 
 
 def run_cmd(cmd):
@@ -95,9 +155,11 @@ def get_quota(ns, use_mock=False, mock_data=None):
                 if key:
                     data[key]['str'] = f"{used} / {limit}"
                     try:
-                        if limit.isdigit() and int(limit) > 0:
-                            data[key]['percent'] = (int(used) / int(limit)) * 100
-                    except:
+                        used_q = parse_quantity(used)
+                        limit_q = parse_quantity(limit)
+                        if limit_q > 0:
+                            data[key]['percent'] = (used_q / limit_q) * 100
+                    except (ValueError, TypeError):
                         pass
 
     return data
@@ -316,18 +378,38 @@ def get_jobs_pods(ns, pods=None, use_mock=False, mock_data=None, gpu_info=None):
                 except Exception:
                     pass
 
-            # User and GPU info
+            # User and GPU info. The owner label (docs/LABELS.md) is the
+            # reliable source; guessing from the image is a last resort.
             user = "Unknown"
             gpu_request = 0
+            cpu_request = 0.0
             gpu_type_from_selector = None
+            job_labels = job.get('metadata', {}).get('labels', {}) or {}
+            tpl_meta = spec.get('template', {}).get('metadata', {}) or {}
+            tpl_labels = tpl_meta.get('labels', {}) or {}
+            for labels in (job_labels, tpl_labels):
+                if labels.get('owner'):
+                    user = labels['owner']
+                    break
             try:
                 pod_spec = spec['template']['spec']
                 containers = pod_spec['containers']
-                img = containers[0]['image']
-                parts = img.split('/')
-                user = parts[0] if len(parts) > 1 else img.split(':')[0]
+                if user == "Unknown":
+                    # Docker Hub style: first path segment is the account.
+                    # Registry style (host has a dot): the tag often carries
+                    # the username (ECIR convention cuda-eidf:<user>).
+                    img = containers[0]['image']
+                    parts = img.split('/')
+                    tag = img.rsplit(':', 1)[1] if ':' in img else ''
+                    if len(parts) > 1 and '.' not in parts[0]:
+                        user = parts[0]
+                    elif (tag and tag != 'latest'
+                            and not tag[0].isdigit()):
+                        user = tag
+                    elif len(parts) == 1:
+                        user = img.split(':')[0]
 
-                # Get GPU requests
+                # Get GPU and CPU requests
                 for container in containers:
                     resources = container.get('resources', {}).get('requests', {})
                     for key, value in resources.items():
@@ -336,6 +418,11 @@ def get_jobs_pods(ns, pods=None, use_mock=False, mock_data=None, gpu_info=None):
                                 gpu_request += int(value)
                             except (ValueError, TypeError):
                                 # Intentionally ignore bad GPU request values.
+                                pass
+                        elif key == 'cpu':
+                            try:
+                                cpu_request += parse_quantity(value)
+                            except (ValueError, TypeError):
                                 pass
 
                 # Get GPU type from nodeSelector (most reliable source)
@@ -379,6 +466,7 @@ def get_jobs_pods(ns, pods=None, use_mock=False, mock_data=None, gpu_info=None):
                 'duration': duration,
                 'pods': my_pods,
                 'gpu': gpu_request,
+                'cpu': cpu_request,
                 'gpu_type': job_gpu_type  # The actual GPU type being used
             })
 
@@ -398,6 +486,14 @@ def get_pod_logs(ns, pod_name, tail_lines=100, use_mock=False, mock_data=None):
 
     cmd = f"kubectl -n {ns} logs {pod_name} --tail={tail_lines}"
     return run_cmd(cmd)
+
+
+def get_describe(ns, kind, name, use_mock=False, mock_data=None):
+    """Fetch `kubectl describe` output for a job or pod."""
+    if use_mock:
+        return (f"(describe is not available in mock mode)\n\n"
+                f"Would run: kubectl -n {ns} describe {kind} {name}")
+    return run_cmd(f"kubectl -n {ns} describe {kind} {name}")
 
 
 def get_local_metrics():
@@ -494,6 +590,14 @@ def build_row_index(jobs):
         else:
             gpu_display = "-"
 
+        # Format CPU request (cores); requests like "500m" show as 0.5
+        cpu_req = job.get('cpu', 0) or 0
+        if cpu_req > 0:
+            cpu_display = (f"{cpu_req:.0f}" if float(cpu_req).is_integer()
+                           else f"{cpu_req:.1f}")
+        else:
+            cpu_display = "-"
+
         all_rows.append({
             'type': 'job',
             'name': job['name'],
@@ -501,6 +605,7 @@ def build_row_index(jobs):
             'user': job['user'],
             'status': f"[{status_style}]{job['status']}[/]",
             'gpu': gpu_display,
+            'cpu': cpu_display,
             'completions': job['completions'],
             'duration': job['duration'],
             'pod_name': None  # Jobs don't have pod_name for log viewing
@@ -528,6 +633,7 @@ def build_row_index(jobs):
                 'user': "",
                 'status': f"[{p_status_style}]{p_status}[/]",
                 'gpu': "",
+                'cpu': "",
                 'completions': "",
                 'duration': "",
                 'pod_name': p_name  # Actual pod name for log fetching
@@ -541,6 +647,7 @@ def generate_table(jobs, offset=0, max_rows=None, selected_index=0):
     table.add_column("User", style="magenta")
     table.add_column("Status", justify="center")
     table.add_column("GPU", justify="center", style="yellow")
+    table.add_column("CPU", justify="right", style="green")
     table.add_column("Comp", justify="right")
     table.add_column("Duration", justify="right")
 
@@ -568,6 +675,7 @@ def generate_table(jobs, offset=0, max_rows=None, selected_index=0):
             row['user'],
             row['status'],
             row['gpu'],
+            row['cpu'],
             row['completions'],
             row['duration']
         )
@@ -576,19 +684,30 @@ def generate_table(jobs, offset=0, max_rows=None, selected_index=0):
 
 
 def generate_cluster_resources(quota, gpu_info=None):
-    grid = Table.grid(expand=True)
-    grid.add_column()
+    grid = Table.grid(expand=True, padding=(0, 1))
+    grid.add_column(no_wrap=True)
+    grid.add_column(ratio=1)
     grid.add_column(justify="right")
 
-    grid.add_row("[bold]CPU[/bold]", quota['cpu']['str'])
-    grid.add_row("[bold]MEM[/bold]", quota['mem']['str'])
-    grid.add_row("[bold]GPU[/bold]", quota['gpu']['str'])
+    for label, key in (("CPU", 'cpu'), ("MEM", 'mem'), ("GPU", 'gpu')):
+        entry = quota[key]
+        pct = entry.get('percent')
+        if pct is None and '/' in entry.get('str', ''):
+            # Data sources that only carry the "used / limit" string
+            try:
+                used_s, limit_s = entry['str'].split('/')
+                limit_q = parse_quantity(limit_s)
+                if limit_q > 0:
+                    pct = parse_quantity(used_s) / limit_q * 100
+            except (ValueError, TypeError):
+                pass
+        bar = usage_bar(pct) if pct is not None else "[dim]" + "─" * 14 + "[/dim]"
+        grid.add_row(f"[bold]{label}[/bold]", bar, entry['str'])
 
-    # Add detailed GPU info by type
+    # Detailed per-model GPU allocation with bars
     if gpu_info and gpu_info.get('nodes'):
-        grid.add_row("", "")  # Spacer
+        grid.add_row("", "", "")  # Spacer
 
-        # Aggregate by GPU type
         gpu_by_type = {}
         for node in gpu_info['nodes']:
             gpu_type = node['gpu_type']
@@ -597,31 +716,74 @@ def generate_cluster_resources(quota, gpu_info=None):
             gpu_by_type[gpu_type]['total'] += node['gpu_count']
             gpu_by_type[gpu_type]['allocated'] += node['allocated']
 
-        # Display each GPU type with usage
         for gpu_type, counts in gpu_by_type.items():
-            used = counts['allocated']
-            total = counts['total']
-            # Color based on utilization
-            if total > 0:
-                pct = (used / total) * 100
-                if pct >= 80:
-                    color = "red"
-                elif pct >= 50:
-                    color = "yellow"
-                else:
-                    color = "green"
-            else:
-                color = "dim"
+            used, total = counts['allocated'], counts['total']
+            pct = (used / total) * 100 if total > 0 else 0
             grid.add_row(
-                f"  [cyan]{gpu_type}[/cyan]",
-                f"[{color}]{used}/{total}[/{color}]"
+                f"[cyan]{gpu_type}[/cyan]",
+                usage_bar(pct),
+                f"{used}/{total}"
             )
 
     return Panel(grid, title="Cluster Quota", border_style="blue")
 
 
-def generate_log_viewer(logs, pod_name, scroll_offset=0, max_lines=None):
-    """Generate a log viewer panel for a specific pod."""
+def generate_user_summary(jobs):
+    """Live per-user GPU allocation leaderboard (from active workloads)."""
+    per_user = {}
+    for job in jobs:
+        if job['status'] not in ('Running', 'Pending'):
+            continue
+        user = job.get('user') or 'Unknown'
+        agg = per_user.setdefault(
+            user, {'gpus': 0, 'cpus': 0.0, 'running': 0, 'pending': 0,
+                   'models': set()})
+        if job['status'] == 'Running':
+            agg['gpus'] += job.get('gpu', 0)
+            agg['cpus'] += job.get('cpu', 0) or 0
+            agg['running'] += 1
+        else:
+            agg['pending'] += 1
+        if job.get('gpu_type'):
+            agg['models'].add(job['gpu_type'])
+
+    table = Table(box=box.SIMPLE_HEAD, expand=True)
+    table.add_column("User", style="magenta", no_wrap=True)
+    table.add_column("GPUs", justify="right", style="yellow")
+    table.add_column("", min_width=20)
+    table.add_column("CPUs", justify="right", style="green")
+    table.add_column("Run", justify="right", style="green")
+    table.add_column("Pend", justify="right", style="dim")
+    table.add_column("Models", style="cyan")
+
+    ranked = sorted(per_user.items(),
+                    key=lambda kv: kv[1]['gpus'], reverse=True)
+    max_gpus = max((agg['gpus'] for _, agg in ranked), default=0) or 1
+    for user, agg in ranked:
+        cpus = agg['cpus']
+        cpu_display = (f"{cpus:.0f}" if float(cpus).is_integer()
+                       else f"{cpus:.1f}") if cpus > 0 else "-"
+        table.add_row(
+            user, str(agg['gpus']),
+            usage_bar(agg['gpus'] / max_gpus * 100, width=20),
+            cpu_display,
+            str(agg['running']), str(agg['pending']),
+            ",".join(sorted(agg['models'])) or "-")
+
+    if not ranked:
+        return Panel("[dim]No active workloads.[/dim]",
+                     title="GPU by User (live)", border_style="yellow")
+    return Panel(
+        table,
+        title="GPU by User (live)",
+        subtitle="[dim]u/ESC Back — allocation now, "
+                 "not history (see: kubmonitor report)[/dim]",
+        border_style="yellow")
+
+
+def generate_log_viewer(logs, pod_name, scroll_offset=0, max_lines=None,
+                        title_label="Logs"):
+    """Generate a scrollable text panel (pod logs or describe output)."""
     lines = logs.split('\n') if logs else ["No logs available"]
 
     # Apply scroll offset
@@ -659,7 +821,7 @@ def generate_log_viewer(logs, pod_name, scroll_offset=0, max_lines=None):
 
     return Panel(
         log_text,
-        title=f"Logs: {pod_name}{scroll_info}",
+        title=f"{title_label}: {pod_name}{scroll_info}",
         subtitle="[dim]↑/↓ Scroll | ESC/Backspace Close | r Refresh[/dim]",
         border_style="cyan",
         expand=True
@@ -667,7 +829,8 @@ def generate_log_viewer(logs, pod_name, scroll_offset=0, max_lines=None):
 
 
 def print_help():
-    console = Console(force_terminal=True, legacy_windows=False)
+    console = Console(force_terminal=True, legacy_windows=False,
+                      theme=build_theme())
 
     console.print(
         "\n[bold cyan]kubmonitor[/bold cyan] - Real-time Kubernetes "
@@ -697,6 +860,13 @@ def print_help():
     )
     console.print("                 Useful for testing and development.")
     console.print(
+        "  [magenta]--theme[/magenta]        Color scheme: "
+        "[cyan]monokai[/cyan] (default) or [cyan]classic[/cyan]."
+    )
+    console.print(
+        "                 [dim]Also settable via $KUBMONITOR_THEME.[/dim]"
+    )
+    console.print(
         "  [magenta]-V, --version[/magenta]  Show kubmonitor's version "
         "number.\n"
     )
@@ -712,6 +882,10 @@ def print_help():
     console.print("[bold yellow]Keyboard Shortcuts:[/bold yellow]")
     console.print("  [cyan]↑/↓[/cyan]            Navigate up and down")
     console.print("  [cyan]Enter[/cyan]          View logs for selected pod")
+    console.print("  [cyan]u[/cyan]              Toggle per-user GPU "
+                  "allocation view")
+    console.print("  [cyan]d[/cyan]              Describe the selected "
+                  "job/pod (kubectl describe)")
     console.print("  [cyan]ESC/Backspace[/cyan]  Close log viewer")
     console.print("  [cyan]r[/cyan]              Refresh logs (in log viewer)")
     console.print("  [cyan]q[/cyan]              Quit the application")
@@ -723,7 +897,16 @@ def print_help():
     )
 
 
+ACCOUNTING_SUBCOMMANDS = ("collect", "report", "validate")
+
+
 def main():
+    # Accounting subcommands live in their own module; everything else is
+    # the original TUI (`kubmonitor [namespace]`).
+    if len(sys.argv) > 1 and sys.argv[1] in ACCOUNTING_SUBCOMMANDS:
+        from accounting_cli import run_subcommand
+        sys.exit(run_subcommand(sys.argv[1], sys.argv[2:]))
+
     if '--help' in sys.argv or '-h' in sys.argv:
         print_help()
         sys.exit(0)
@@ -731,6 +914,10 @@ def main():
     parser = argparse.ArgumentParser(prog='kubmonitor', add_help=False)
     parser.add_argument('namespace', nargs='?', default='default')
     parser.add_argument('--mock', action='store_true')
+    parser.add_argument('--theme', choices=['monokai', 'classic'],
+                        default=None,
+                        help='color scheme (default: $KUBMONITOR_THEME '
+                             'or monokai)')
     parser.add_argument('--version', '-V', action='version',
                         version=f'kubmonitor {__version__}')
 
@@ -764,7 +951,7 @@ def main():
             print("Failed to load mock data. Exiting.")
             return
 
-    console = Console()
+    console = Console(theme=build_theme(args.theme))
     layout = make_layout()
 
     mode_str = "[bold yellow]MOCK MODE[/]" if args.mock else ""
@@ -783,7 +970,8 @@ def main():
         if platform.system() != "Windows":
             tty.setcbreak(sys.stdin.fileno())
 
-        with Live(layout, refresh_per_second=4, screen=True):
+        with Live(layout, refresh_per_second=4, screen=True,
+                  console=console):
             last_fetch = 0
             fetch_interval = 2
             scroll_offset = 0
@@ -794,6 +982,16 @@ def main():
             current_logs = ""
             current_pod_name = ""
             log_scroll_offset = 0
+
+            # Per-user summary view state
+            viewing_users = False
+
+            # Describe view state
+            viewing_desc = False
+            desc_text = ""
+            desc_kind = ""
+            desc_name = ""
+            desc_scroll_offset = 0
 
             pods = get_pods_list(args.namespace, use_mock=args.mock,
                                  mock_data=mock_data)
@@ -829,6 +1027,10 @@ def main():
                             key = 'backspace'
                         elif char.lower() == 'r':
                             key = 'r'
+                        elif char.lower() == 'u':
+                            key = 'u'
+                        elif char.lower() == 'd':
+                            key = 'd'
                 else:
                     while msvcrt.kbhit():
                         key_input = msvcrt.getch()
@@ -850,9 +1052,13 @@ def main():
                                 key = 'q'
                             elif decoded == 'r':
                                 key = 'r'
+                            elif decoded == 'u':
+                                key = 'u'
+                            elif decoded == 'd':
+                                key = 'd'
 
-                # Handle quit
-                if key == 'q' and not viewing_logs:
+                # Handle quit (q closes the log/describe view if one is open)
+                if key == 'q' and not viewing_logs and not viewing_desc:
                     break
 
                 cpu_total, cpu_per_core, mem, gpu = get_local_metrics()
@@ -916,6 +1122,73 @@ def main():
                         f"[dim](auto-refresh {fetch_interval}s)[/dim]  "
                         f"Viewing: [bold]{current_pod_name}[/bold]",
                         style="dim"))
+                elif viewing_desc:
+                    # kubectl describe view for the selected job/pod
+                    desc_lines = desc_text.split('\n') if desc_text else []
+                    max_desc_scroll = max(0, len(desc_lines)
+                                          - max_visible_rows + 5)
+                    if key in ('escape', 'backspace', 'd', 'q'):
+                        viewing_desc = False
+                        desc_text = ""
+                        desc_scroll_offset = 0
+                    elif key == 'up':
+                        desc_scroll_offset = max(0, desc_scroll_offset - 1)
+                    elif key == 'down':
+                        desc_scroll_offset = min(max_desc_scroll,
+                                                 desc_scroll_offset + 1)
+                    elif key == 'r':
+                        desc_text = get_describe(
+                            args.namespace, desc_kind, desc_name,
+                            use_mock=args.mock, mock_data=mock_data)
+
+                    layout["cluster_resources"].update(
+                        generate_cluster_resources(quota, gpu_info))
+                    layout["local_resources"].update(
+                        generate_local_resources(cpu_total, cpu_per_core, mem,
+                                                 gpu))
+                    layout["right"].update(generate_log_viewer(
+                        desc_text, f"{desc_kind}/{desc_name}",
+                        scroll_offset=desc_scroll_offset,
+                        max_lines=max_visible_rows,
+                        title_label="Describe"
+                    ))
+                    layout["footer"].update(Panel(
+                        f"[cyan]↑/↓[/cyan] Scroll  [cyan]r[/cyan] Refresh  "
+                        f"[cyan]d/ESC/Bksp/q[/cyan] Close  "
+                        f"Describing: [bold]{desc_kind}/{desc_name}[/bold]",
+                        style="dim"))
+                elif viewing_users:
+                    # Per-user GPU allocation view
+                    if key in ('u', 'escape', 'backspace'):
+                        viewing_users = False
+
+                    now = time.time()
+                    if now - last_fetch > fetch_interval:
+                        pods = get_pods_list(args.namespace, use_mock=args.mock,
+                                             mock_data=mock_data)
+                        quota = get_quota(args.namespace, use_mock=args.mock,
+                                          mock_data=mock_data)
+                        gpu_info = get_gpu_info(args.namespace, pods=pods,
+                                                use_mock=args.mock,
+                                                mock_data=mock_data)
+                        jobs = get_jobs_pods(args.namespace, pods=pods,
+                                             use_mock=args.mock,
+                                             mock_data=mock_data,
+                                             gpu_info=gpu_info)
+                        last_fetch = now
+
+                    layout["cluster_resources"].update(
+                        generate_cluster_resources(quota, gpu_info))
+                    layout["local_resources"].update(
+                        generate_local_resources(cpu_total, cpu_per_core, mem,
+                                                 gpu))
+                    layout["right"].update(generate_user_summary(jobs))
+                    layout["footer"].update(Panel(
+                        "[cyan]u/ESC/Bksp[/cyan] Back to Jobs  "
+                        "[cyan]q[/cyan] Quit"
+                        "  [dim]live allocation by user — history: "
+                        "kubmonitor report[/dim]",
+                        style="dim"))
                 else:
                     # Normal job/pod list mode
                     # Calculate max scroll position with buffer to ensure
@@ -932,6 +1205,20 @@ def main():
                         # Auto-scroll to keep selection visible
                         if selected_index >= scroll_offset + max_visible_rows:
                             scroll_offset = selected_index - max_visible_rows + 1
+                    elif key == 'u':
+                        viewing_users = True
+                    elif key == 'd':
+                        # Describe the selected job or pod
+                        if total_rows > 0 and selected_index < len(all_rows):
+                            selected_row = all_rows[selected_index]
+                            desc_kind = ('job' if selected_row['type'] == 'job'
+                                         else 'pod')
+                            desc_name = selected_row['name']
+                            desc_scroll_offset = 0
+                            desc_text = get_describe(
+                                args.namespace, desc_kind, desc_name,
+                                use_mock=args.mock, mock_data=mock_data)
+                            viewing_desc = True
                     elif key == 'enter':
                         # Open log viewer for selected pod
                         if total_rows > 0 and selected_index < len(all_rows):
@@ -978,8 +1265,9 @@ def main():
                     layout["right"].update(Panel(table, title=jobs_title,
                                                  border_style="green"))
                     layout["footer"].update(Panel(
-                        "[cyan]↑/↓[/cyan] Navigate  [cyan]Enter[/cyan] View "
-                        "Logs  [cyan]q[/cyan] Quit",
+                        "[cyan]↑/↓[/cyan] Navigate  [cyan]Enter[/cyan] Logs"
+                        "  [cyan]d[/cyan] Describe  [cyan]u[/cyan] Users"
+                        "  [cyan]q[/cyan] Quit",
                         style="dim"))
 
                 time.sleep(0.1)
