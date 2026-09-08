@@ -1,0 +1,28 @@
+# kubmonitor project config — one file per monitored project/namespace.
+# Pass it to the accounting subcommands:
+#   kubmonitor collect --config /path/to/project.yaml
+#   kubmonitor report  --config /path/to/project.yaml --month 2026-09
+#
+# Keep the real copy (and members.yaml, and the SQLite DB) OUTSIDE any
+# public repo — members.yaml contains personal data.
+
+project: eidf105              # short project id, stored with every record
+namespace: eidf105ns          # Kubernetes namespace to collect from
+kube_context: ""              # optional kubectl context; empty = current
+
+# Where usage history accumulates. Parent directory must exist.
+db: /home/eidf105/eidf105/ops/kubmonitor/usage.sqlite
+
+# Person <-> accounts registry (see examples/members.yaml). Optional but
+# strongly recommended: without it, reports aggregate per account instead
+# of per person, and name-based attribution is disabled.
+members_file: /home/eidf105/eidf105/ops/kubmonitor/members.yaml
+
+# Sample real GPU utilization by exec'ing nvidia-smi inside running GPU
+# pods of this namespace. Costs one `kubectl exec` per running GPU pod per
+# collect run; set false if pods lack nvidia-smi or this is too slow.
+sample_gpu_util: true
+
+# Optional label prefix (docs/LABELS.md). Empty = plain owner/project/
+# purpose labels, which is the default contract.
+label_prefix: ""

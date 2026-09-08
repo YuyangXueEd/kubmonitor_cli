@@ -11,12 +11,14 @@ setup(
     long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
     author="yyx",
-    url="https://github.com/yyx/kubmonitor-cli",
+    url="https://github.com/vios-s/kubmonitor_cli",
     packages=find_packages(),
-    py_modules=["monitor", "mock_data", "version"],
+    py_modules=["monitor", "mock_data", "version", "kmconfig", "usagedb",
+                "collector", "report", "accounting_cli"],
     install_requires=[
         "rich",
-        "psutil"
+        "psutil",
+        "pyyaml"
     ],
     extras_require={
         "dev": [
@@ -33,5 +35,5 @@ setup(
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
     ],
-    python_requires='>=3.6',
+    python_requires='>=3.8',
 )

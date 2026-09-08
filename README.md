@@ -110,6 +110,9 @@ This will generate realistic mock data including:
 | Key | Description |
 | :---: | :--- |
 | `↑` / `↓` | **Navigate** up and down |
+| `Enter` | **View logs** for the selected pod |
+| `d` | **Describe** the selected job/pod (`kubectl describe`) |
+| `u` | **Per-user view**: live GPU allocation leaderboard |
 | `q` | **Quit** the application |
 | `Ctrl+C` | Force Exit |
 
