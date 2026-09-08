@@ -44,11 +44,13 @@ def _name_tokens_contains(name, account):
     return f"-{norm}-" in f"-{name.lower()}-"
 
 
-def _first_image(pod_spec):
-    for container in pod_spec.get("containers", []) or []:
-        if container.get("image"):
-            return container["image"]
-    return None
+def _images_of(pod_spec):
+    """All container images, comma-joined (or None). Persisted so that
+    retroactive re-attribution sees the same hints live attribution did,
+    including multi-container pods."""
+    images = [c["image"] for c in pod_spec.get("containers", []) or []
+              if c.get("image")]
+    return ",".join(images) if images else None
 
 
 def _image_hints(pod_spec):
@@ -272,7 +274,8 @@ def _reattribute_unknown(conn, cfg, name_map):
     for row in rows:
         hints = ()
         if row["image"]:
-            hints = _image_hints({"containers": [{"image": row["image"]}]})
+            hints = _image_hints({"containers": [
+                {"image": img} for img in row["image"].split(",")]})
         account, attribution = resolve_account(
             row["name"], [{}], cfg.label_prefix, name_map, hints)
         if account:
@@ -356,7 +359,7 @@ def collect(cfg, use_mock=False, verbose=False):
                 "account": account, "attribution": attribution,
                 "purpose": _purpose_of(label_sets, cfg.label_prefix),
                 "gpu_count": gpu, "gpu_model": gpu_model,
-                "image": _first_image(pod_spec),
+                "image": _images_of(pod_spec),
                 "cpu_request": cpu, "mem_request_gb": mem_gb,
                 "node": node,
                 "created_at": job.get("metadata", {}).get("creationTimestamp"),
@@ -387,7 +390,7 @@ def collect(cfg, use_mock=False, verbose=False):
                 "account": account, "attribution": attribution,
                 "purpose": _purpose_of(label_sets, cfg.label_prefix),
                 "gpu_count": gpu, "gpu_model": gpu_model,
-                "image": _first_image(pod_spec),
+                "image": _images_of(pod_spec),
                 "cpu_request": cpu, "mem_request_gb": mem_gb,
                 "node": node,
                 "created_at": pod.get("metadata", {}).get("creationTimestamp"),
