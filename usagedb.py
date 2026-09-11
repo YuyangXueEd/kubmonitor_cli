@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS util_samples (
     project      TEXT NOT NULL,
     pod_uid      TEXT NOT NULL,
     pod_name     TEXT NOT NULL,
+    workload_uid TEXT,               -- owning Job's uid (pod's own for bare pods)
     account      TEXT,
     gpu_index    INTEGER,
     util_pct     REAL,
@@ -57,6 +58,7 @@ CREATE TABLE IF NOT EXISTS util_samples (
     mem_total_mb REAL
 );
 CREATE INDEX IF NOT EXISTS idx_util_pod ON util_samples (project, pod_uid);
+CREATE INDEX IF NOT EXISTS idx_util_ts ON util_samples (project, ts);
 
 CREATE TABLE IF NOT EXISTS collect_runs (
     ts      TEXT NOT NULL,
@@ -93,6 +95,12 @@ def _migrate(conn):
             conn.execute("PRAGMA table_info(workloads)")}
     if "image" not in cols:
         conn.execute("ALTER TABLE workloads ADD COLUMN image TEXT")
+        conn.commit()
+    sample_cols = {row["name"] for row in
+                   conn.execute("PRAGMA table_info(util_samples)")}
+    if "workload_uid" not in sample_cols:
+        conn.execute(
+            "ALTER TABLE util_samples ADD COLUMN workload_uid TEXT")
         conn.commit()
 
 
@@ -147,13 +155,14 @@ def add_quota_snapshot(conn, ts, project, resource, used, hard):
 
 
 def add_util_sample(conn, ts, project, pod_uid, pod_name, account,
-                    gpu_index, util_pct, mem_used_mb, mem_total_mb):
+                    gpu_index, util_pct, mem_used_mb, mem_total_mb,
+                    workload_uid=None):
     conn.execute(
-        "INSERT INTO util_samples (ts, project, pod_uid, pod_name, account, "
-        "gpu_index, util_pct, mem_used_mb, mem_total_mb) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (ts, project, pod_uid, pod_name, account, gpu_index, util_pct,
-         mem_used_mb, mem_total_mb))
+        "INSERT INTO util_samples (ts, project, pod_uid, pod_name, "
+        "workload_uid, account, gpu_index, util_pct, mem_used_mb, "
+        "mem_total_mb) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (ts, project, pod_uid, pod_name, workload_uid, account, gpu_index,
+         util_pct, mem_used_mb, mem_total_mb))
 
 
 def add_collect_run(conn, ts, project, ok, pods, jobs, note=""):

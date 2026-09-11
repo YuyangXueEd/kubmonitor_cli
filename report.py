@@ -186,6 +186,30 @@ def build_report_data(conn, cfg, members, w_start, w_end):
     idle = []
     now = datetime.now(timezone.utc)
     sample_cutoff = (now - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # One aggregation pass over the window, joined to workloads by the
+    # owning uid the collector stamps on each sample (exact, no name
+    # guessing; also avoids one query per candidate workload).
+    util_by_wl = {r["workload_uid"]: r for r in conn.execute(
+        "SELECT workload_uid, AVG(util_pct) AS u, COUNT(*) AS n "
+        "FROM util_samples WHERE project = ? AND ts >= ? "
+        "AND workload_uid IS NOT NULL GROUP BY workload_uid",
+        (cfg.project, sample_cutoff))}
+    # Transition fallback for samples recorded before workload_uid
+    # existed: a Job pod is exactly <job>-<one suffix segment>, so demand
+    # that shape instead of a bare prefix (which would also swallow
+    # another job named <job>-worker).
+    legacy = conn.execute(
+        "SELECT pod_name, util_pct FROM util_samples "
+        "WHERE project = ? AND ts >= ? AND workload_uid IS NULL",
+        (cfg.project, sample_cutoff)).fetchall()
+
+    def _legacy_stats(name):
+        vals = [s["util_pct"] for s in legacy
+                if s["pod_name"] == name or (
+                    s["pod_name"].startswith(name + "-")
+                    and "-" not in s["pod_name"][len(name) + 1:])]
+        return (sum(vals) / len(vals), len(vals)) if vals else (None, 0)
+
     for row in rows:
         if (row["gpu_count"] or 0) <= 0 or row["phase"] != "Running":
             continue
@@ -198,13 +222,12 @@ def build_report_data(conn, cfg, members, w_start, w_end):
         age_h = (now - started).total_seconds() / 3600
         if age_h < 6:
             continue  # too young to judge
-        stats = conn.execute(
-            "SELECT AVG(util_pct) AS u, COUNT(*) AS n FROM util_samples "
-            "WHERE project = ? AND ts >= ? "
-            "AND (pod_name = ? OR pod_name LIKE ?)",
-            (cfg.project, sample_cutoff, row["name"],
-             row["name"] + "-%")).fetchone()
-        if stats["n"] and stats["n"] >= 3 and stats["u"] < 15:
+        hit = util_by_wl.get(row["uid"])
+        if hit:
+            mean_u, n = hit["u"], hit["n"]
+        else:
+            mean_u, n = _legacy_stats(row["name"])
+        if n >= 3 and mean_u < 15:
             account = row["account"]
             person = members.person_for(account) if account else None
             idle.append({
@@ -213,7 +236,7 @@ def build_report_data(conn, cfg, members, w_start, w_end):
                 "gpu_count": row["gpu_count"],
                 "gpu_model": row["gpu_model"] or "?",
                 "age_h": age_h,
-                "util": stats["u"],
+                "util": mean_u,
                 "purpose": row["purpose"] or "unspecified",
             })
     idle.sort(key=lambda w: w["gpu_count"] * w["age_h"], reverse=True)

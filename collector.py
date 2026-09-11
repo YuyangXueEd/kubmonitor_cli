@@ -193,7 +193,7 @@ def _uid_of(obj, cfg, kind):
     return meta.get("uid") or f"{cfg.namespace}/{kind}/{meta.get('name', '?')}"
 
 
-def _sample_pod_gpus(cfg, pod, account, ts, conn):
+def _sample_pod_gpus(cfg, pod, account, ts, conn, workload_uid=None):
     """Exec nvidia-smi inside a running GPU pod; ignore all failures."""
     pod_name = pod["metadata"]["name"]
     cmd = cfg.kubectl(
@@ -219,7 +219,8 @@ def _sample_pod_gpus(cfg, pod, account, ts, conn):
             continue
         usagedb.add_util_sample(
             conn, ts, cfg.project, _uid_of(pod, cfg, "Pod"), pod_name,
-            account, idx, util, mem_used, mem_total)
+            account, idx, util, mem_used, mem_total,
+            workload_uid=workload_uid)
         count += 1
     return count
 
@@ -352,7 +353,7 @@ def collect(cfg, use_mock=False, verbose=False):
             else:
                 bare_pods.append(pod)
 
-        gpu_pods_to_sample = []  # (pod, account)
+        gpu_pods_to_sample = []  # (pod, account, owning workload uid)
         current_uids = set()     # everything seen in this snapshot
 
         for job in jobs:
@@ -364,6 +365,8 @@ def collect(cfg, use_mock=False, verbose=False):
                 image_hints=_image_hints(pod_spec))
             gpu, cpu, mem_gb = _pod_spec_requests(pod_spec)
             gpu_model = _gpu_model_from_selector(pod_spec)
+            job_uid = _uid_of(job, cfg, "Job")
+            current_uids.add(job_uid)
             node = None
             for pod in pods_by_job.get(name, []):
                 node = pod.get("spec", {}).get("nodeName") or node
@@ -371,10 +374,8 @@ def collect(cfg, use_mock=False, verbose=False):
                     gpu_model = node_map[node]
                 if (gpu > 0 and
                         pod.get("status", {}).get("phase") == "Running"):
-                    gpu_pods_to_sample.append((pod, account))
+                    gpu_pods_to_sample.append((pod, account, job_uid))
             status = job.get("status", {}) or {}
-            job_uid = _uid_of(job, cfg, "Job")
-            current_uids.add(job_uid)
             usagedb.upsert_workload(conn, {
                 "uid": job_uid,
                 "project": cfg.project, "namespace": cfg.namespace,
@@ -404,10 +405,10 @@ def collect(cfg, use_mock=False, verbose=False):
             if gpu > 0 and not gpu_model and node in node_map:
                 gpu_model = node_map[node]
             phase = pod.get("status", {}).get("phase", "Unknown")
-            if gpu > 0 and phase == "Running":
-                gpu_pods_to_sample.append((pod, account))
             pod_uid = _uid_of(pod, cfg, "Pod")
             current_uids.add(pod_uid)
+            if gpu > 0 and phase == "Running":
+                gpu_pods_to_sample.append((pod, account, pod_uid))
             usagedb.upsert_workload(conn, {
                 "uid": pod_uid,
                 "project": cfg.project, "namespace": cfg.namespace,
@@ -431,8 +432,9 @@ def collect(cfg, use_mock=False, verbose=False):
 
         samples = 0
         if cfg.sample_gpu_util and not use_mock:
-            for pod, account in gpu_pods_to_sample:
-                samples += _sample_pod_gpus(cfg, pod, account, ts, conn)
+            for pod, account, wl_uid in gpu_pods_to_sample:
+                samples += _sample_pod_gpus(cfg, pod, account, ts, conn,
+                                            workload_uid=wl_uid)
 
         usagedb.add_collect_run(conn, ts, cfg.project, True,
                                 len(pods), len(jobs),
