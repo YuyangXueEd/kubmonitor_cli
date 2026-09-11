@@ -255,6 +255,26 @@ def _snapshot_quota(cfg, conn, ts, use_mock, mock_data):
                 parse_quantity(used.get(key, 0)), parse_quantity(hard_val))
 
 
+def _mark_deleted(conn, cfg, current_uids):
+    """Freeze rows for workloads that vanished before finishing.
+
+    A job deleted while Running never gets a completionTime, so its row
+    would claim "Running" forever. Marking it 'Deleted' keeps reports
+    honest; GPU-hour accounting is unaffected either way because accrual
+    already stops at last_seen.
+    """
+    rows = conn.execute(
+        "SELECT uid FROM workloads WHERE project = ? "
+        "AND phase IN ('Running', 'Pending', 'Unknown')",
+        (cfg.project,)).fetchall()
+    gone = [r["uid"] for r in rows if r["uid"] not in current_uids]
+    if gone:
+        conn.executemany(
+            "UPDATE workloads SET phase = 'Deleted' WHERE uid = ?",
+            [(uid,) for uid in gone])
+    return len(gone)
+
+
 def _reattribute_unknown(conn, cfg, name_map):
     """Retry attribution for historical rows that have none.
 
@@ -333,6 +353,7 @@ def collect(cfg, use_mock=False, verbose=False):
                 bare_pods.append(pod)
 
         gpu_pods_to_sample = []  # (pod, account)
+        current_uids = set()     # everything seen in this snapshot
 
         for job in jobs:
             name = job["metadata"]["name"]
@@ -352,8 +373,10 @@ def collect(cfg, use_mock=False, verbose=False):
                         pod.get("status", {}).get("phase") == "Running"):
                     gpu_pods_to_sample.append((pod, account))
             status = job.get("status", {}) or {}
+            job_uid = _uid_of(job, cfg, "Job")
+            current_uids.add(job_uid)
             usagedb.upsert_workload(conn, {
-                "uid": _uid_of(job, cfg, "Job"),
+                "uid": job_uid,
                 "project": cfg.project, "namespace": cfg.namespace,
                 "kind": "Job", "name": name,
                 "account": account, "attribution": attribution,
@@ -383,8 +406,10 @@ def collect(cfg, use_mock=False, verbose=False):
             phase = pod.get("status", {}).get("phase", "Unknown")
             if gpu > 0 and phase == "Running":
                 gpu_pods_to_sample.append((pod, account))
+            pod_uid = _uid_of(pod, cfg, "Pod")
+            current_uids.add(pod_uid)
             usagedb.upsert_workload(conn, {
-                "uid": _uid_of(pod, cfg, "Pod"),
+                "uid": pod_uid,
                 "project": cfg.project, "namespace": cfg.namespace,
                 "kind": "Pod", "name": name,
                 "account": account, "attribution": attribution,
@@ -401,6 +426,7 @@ def collect(cfg, use_mock=False, verbose=False):
 
         _snapshot_quota(cfg, conn, ts, use_mock, mock_data)
 
+        deleted = _mark_deleted(conn, cfg, current_uids)
         healed = _reattribute_unknown(conn, cfg, name_map)
 
         samples = 0
@@ -410,12 +436,13 @@ def collect(cfg, use_mock=False, verbose=False):
 
         usagedb.add_collect_run(conn, ts, cfg.project, True,
                                 len(pods), len(jobs),
-                                f"util_samples={samples} healed={healed}")
+                                f"util_samples={samples} healed={healed} "
+                                f"deleted={deleted}")
         conn.commit()
         if verbose:
             print(f"[{ts}] {cfg.project}: {len(jobs)} jobs, "
                   f"{len(pods)} pods, {samples} GPU util samples, "
-                  f"{healed} historical rows re-attributed")
+                  f"{healed} re-attributed, {deleted} marked Deleted")
         return len(jobs), len(pods)
     except Exception as exc:
         conn.rollback()

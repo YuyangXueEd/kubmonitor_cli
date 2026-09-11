@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS workloads (
     created_at   TEXT,               -- ISO8601 UTC
     started_at   TEXT,
     completed_at TEXT,
-    phase        TEXT,               -- Pending|Running|Succeeded|Failed|Unknown
+    phase        TEXT,               -- Pending|Running|Succeeded|Failed|
+                                     -- Deleted (removed before finishing)|Unknown
     first_seen   TEXT NOT NULL,
     last_seen    TEXT NOT NULL
 );
