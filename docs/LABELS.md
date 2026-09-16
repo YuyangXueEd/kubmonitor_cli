@@ -81,6 +81,25 @@ The resolved *account* maps to a *person* via the members file
 (`examples/members.yaml`), so one person with several accounts appears
 as a single row in reports.
 
+## Existing usage data
+
+The `project` label was required by `kubmonitor validate` from the start,
+but the collector never read it, so **no historical value exists to
+migrate**. Nothing needs to be rewritten, and nothing is lost.
+
+Opening the DB adds a `workloads.research_project` column automatically
+(`usagedb._migrate`); this is additive and safe to run against a live DB
+with a cron collector writing to it. Workloads collected before the upgrade
+keep `NULL` there, and so do workloads that carry no `project` label.
+
+`NULL` means *unknown*, and must not be backfilled to `eidf105`: the old
+label said only "this workload is in the eidf105 allocation", which is not
+a research project and is already implied by the namespace. Any report
+grouping by this column should show unknowns as their own bucket rather
+than folding them into a real project. Expect every pre-upgrade row to sit
+in that bucket — a per-project breakdown only becomes meaningful for
+workloads submitted after the templates start filling the label.
+
 ## Two things called "project"
 
 Confusingly, `project` currently names two unrelated things:
