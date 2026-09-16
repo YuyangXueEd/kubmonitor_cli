@@ -10,13 +10,13 @@ should stamp these on **both** the Job's `metadata.labels` and the pod
 | Label | Required | Example | Meaning |
 |---|---|---|---|
 | `owner` | **yes** | `rasin` | The cluster account that owns this workload (login account name, not a display name). |
-| `project` | **yes** | `mri-recon` | The *research* project this workload is work on — the strand of work it belongs to, chosen by the owner. |
+| `project` | **yes** | `mri_recon` | The *research* project this workload is work on — the strand of work it belongs to, chosen by the owner. |
 | `purpose` | recommended | `batch` | One of `batch`, `interactive`, `serving`. |
 
 ### `project` is your research project, not your allocation code
 
 The point of `project` is to separate one person's strands of work:
-`mri-recon`, `fairness`, `diffusion-priors`. Two people on the same
+`mri_recon`, `fairness`, `diffusion_priors`. Two people on the same
 research project use the same value; one person running three projects
 uses three.
 
@@ -27,14 +27,39 @@ recorded — it is what the namespace *is*, and kubmonitor stores the
 namespace alongside every workload.
 
 Pick something short, stable and reusable across runs. Reports group by
-this value, so `mri-recon` on Monday and `mri_recon_v2` on Tuesday are two
-different projects. Values are free-form; there is no registry of valid
-names.
+this value verbatim, so `mri_recon` on Monday and `mri_recon_v2` on Tuesday
+are two different projects.
 
 Label *values* may contain letters, digits, `-`, `_` and `.` (max 63
 chars), so accounts like `ada_lovelace` are valid values — note that
 underscores are **not** valid in resource *names*, which is why labels
 beat name conventions for identifying owners.
+
+**Separator convention: underscores.** `mri_recon`, not `mri-recon`. Both
+are legal label values, which is exactly the problem — pick one or reports
+end up with each project split across two spellings. This group follows
+its account names (`ada_lovelace`).
+
+To make that convention enforceable rather than aspirational, a project
+config may list the group's known projects:
+
+```yaml
+research_projects: [mri_recon, fairness, diffusion_priors]
+```
+
+`kubmonitor validate` then warns about a value that is not listed, and
+when the value differs from a listed one only by separator or case it says
+so outright:
+
+```
+warning: job.yaml: Job project 'mri-recon' is not registered, but
+'mri_recon' is — same name, different spelling? Reports count them
+separately
+```
+
+It is a **warning, never an error**: someone starting a new project at
+2am must not have to land a config change before they can submit a job.
+Leave the key out to switch the check off.
 
 A custom prefix (e.g. `example.org/owner`) is supported via the
 `label_prefix` project-config option and `kubmonitor validate --prefix`;
@@ -50,7 +75,7 @@ metadata:
   labels:
     kueue.x-k8s.io/queue-name: eidf105ns-user-queue
     owner: rasin
-    project: mri-recon
+    project: mri_recon
     purpose: batch
 spec:
   template:
@@ -58,7 +83,7 @@ spec:
       labels:
         app: cuda
         owner: rasin
-        project: mri-recon
+        project: mri_recon
         purpose: batch
     spec:
       ...
@@ -106,14 +131,19 @@ Confusingly, `project` currently names two unrelated things:
 
 | Where | Means | Example |
 |---|---|---|
-| the `project` **label** (this document) | the owner's research project | `mri-recon` |
+| the `project` **label** (this document) | the owner's research project | `mri_recon` |
 | the `project:` key in a kubmonitor **project config** | which namespace this config monitors, and the scope key for its rows in the DB | `eidf105` |
 
-The config key is redundant — it is the namespace with `ns` stripped, and
-`namespace:` is already a required key right beside it. It is slated for
-removal, after which `project` means only the research project. Until then,
-read the word by its location: in a manifest it is research, in
-`project.yaml` it is the allocation.
+For a single-namespace setup the config key is redundant — it is the
+namespace with `ns` stripped, and `namespace:` sits right beside it. It is
+not, however, merely a duplicate: two configs sharing a `project` id but
+naming different namespaces, and writing to one DB, produce a report
+aggregated across both. Nothing does that today, so collapsing the two is
+worth considering — but only alongside work that touches the report
+queries anyway, not as a standalone migration of a live DB.
+
+Until then, read the word by its location: in a manifest it is the
+research project, in `project.yaml` it is the allocation.
 
 kubmonitor records the label on each workload as `research_project`, kept
 verbatim; the DB column is spelled differently only to avoid colliding with
