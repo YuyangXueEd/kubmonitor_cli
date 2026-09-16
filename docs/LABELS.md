@@ -10,8 +10,26 @@ should stamp these on **both** the Job's `metadata.labels` and the pod
 | Label | Required | Example | Meaning |
 |---|---|---|---|
 | `owner` | **yes** | `rasin` | The cluster account that owns this workload (login account name, not a display name). |
-| `project` | **yes** | `eidf105` | The project the workload belongs to. |
+| `project` | **yes** | `mri-recon` | The *research* project this workload is work on — the strand of work it belongs to, chosen by the owner. |
 | `purpose` | recommended | `batch` | One of `batch`, `interactive`, `serving`. |
+
+### `project` is your research project, not your allocation code
+
+The point of `project` is to separate one person's strands of work:
+`mri-recon`, `fairness`, `diffusion-priors`. Two people on the same
+research project use the same value; one person running three projects
+uses three.
+
+Do **not** put the compute allocation / group code (`eidf105`) here. Every
+workload in a namespace belongs to the same allocation, so that value is
+identical on every row and distinguishes nothing. It is also already
+recorded — it is what the namespace *is*, and kubmonitor stores the
+namespace alongside every workload.
+
+Pick something short, stable and reusable across runs. Reports group by
+this value, so `mri-recon` on Monday and `mri_recon_v2` on Tuesday are two
+different projects. Values are free-form; there is no registry of valid
+names.
 
 Label *values* may contain letters, digits, `-`, `_` and `.` (max 63
 chars), so accounts like `ada_lovelace` are valid values — note that
@@ -32,7 +50,7 @@ metadata:
   labels:
     kueue.x-k8s.io/queue-name: eidf105ns-user-queue
     owner: rasin
-    project: eidf105
+    project: mri-recon
     purpose: batch
 spec:
   template:
@@ -40,7 +58,7 @@ spec:
       labels:
         app: cuda
         owner: rasin
-        project: eidf105
+        project: mri-recon
         purpose: batch
     spec:
       ...
@@ -62,6 +80,25 @@ spec:
 The resolved *account* maps to a *person* via the members file
 (`examples/members.yaml`), so one person with several accounts appears
 as a single row in reports.
+
+## Two things called "project"
+
+Confusingly, `project` currently names two unrelated things:
+
+| Where | Means | Example |
+|---|---|---|
+| the `project` **label** (this document) | the owner's research project | `mri-recon` |
+| the `project:` key in a kubmonitor **project config** | which namespace this config monitors, and the scope key for its rows in the DB | `eidf105` |
+
+The config key is redundant — it is the namespace with `ns` stripped, and
+`namespace:` is already a required key right beside it. It is slated for
+removal, after which `project` means only the research project. Until then,
+read the word by its location: in a manifest it is research, in
+`project.yaml` it is the allocation.
+
+kubmonitor records the label on each workload as `research_project`, kept
+verbatim; the DB column is spelled differently only to avoid colliding with
+the legacy scope column.
 
 ## Checking a manifest
 
