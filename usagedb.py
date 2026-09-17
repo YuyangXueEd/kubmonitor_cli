@@ -145,6 +145,15 @@ def upsert_workload(conn, w):
                :gpu_model, :image, :cpu_request, :mem_request_gb, :node,
                :created_at, :started_at, :completed_at, :phase, :first_seen,
                :last_seen)
+           -- Two groups of columns here, and the difference is deliberate.
+           -- account/purpose/research_project come from labels on the object
+           -- itself, present in the same API response or genuinely absent:
+           -- they overwrite, so relabelling a workload is reflected and a
+           -- removed label does not leave a stale value no one can clear.
+           -- gpu_model/image/node come from sources that are legitimately
+           -- unavailable on some passes (node before scheduling, gpu_model
+           -- from an nvidia-smi exec that can fail), so they COALESCE rather
+           -- than let one unlucky poll erase a known value.
            ON CONFLICT(uid) DO UPDATE SET
                account = excluded.account,
                attribution = excluded.attribution,
