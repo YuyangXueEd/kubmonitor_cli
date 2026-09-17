@@ -35,7 +35,7 @@ label_prefix: ""
 # Advisory only: `kubmonitor validate` warns about a value that is not
 # listed, but never rejects it, so nobody has to land a config change
 # before submitting a job. The point is catching spelling drift, since
-# `mri_recon` and `mri_recon` are two different rows in every report.
+# `mri_recon` and `mri-recon` are two different rows in every report.
 # Group convention is underscores (matching account names like
 # `ada_lovelace`). Omit or leave empty to disable the check entirely.
 research_projects:
